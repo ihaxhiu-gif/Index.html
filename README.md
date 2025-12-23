@@ -28,6 +28,12 @@ th{background:#f1f5f9}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 .col{flex:1;min-width:120px}
 #scanner{width:100%;background:#000;border-radius:8px;overflow:hidden}
+
+/* small modal variant (less tall) */
+.modal-content.small-modal{max-width:420px;padding:12px;text-align:left}
+.modal-content.small-modal h4{margin:6px 0}
+.txn-list{margin:6px 0;padding-left:18px}
+.txn-summary{margin-top:8px;font-weight:600}
 </style>
 
 <script src="https://unpkg.com/@ericblade/quagga2/dist/quagga.js"></script>
@@ -147,6 +153,17 @@ th{background:#f1f5f9}
 </div>
 </div>
 
+<!-- TRANSACTION SUCCESS MODAL (small) -->
+<div class="modal" id="txnModal">
+<div class="modal-content small-modal">
+  <h4 id="txnTitle">Transaksioni</h4>
+  <div id="txnMsg" class="small"></div>
+  <div style="margin-top:12px;text-align:right">
+    <button onclick="closeTxn()">Mbyll</button>
+  </div>
+</div>
+</div>
+
 <script>
 /* ======= DATA & STATE ======= */
 const users=[{u:'admin',p:'admin',r:'admin'},{u:'kasier',p:'kasier',r:'kasier'}];
@@ -173,8 +190,12 @@ const saleTableEl = document.getElementById('saleTable');
 const histTableEl = document.getElementById('histTable');
 const dailyEl = document.getElementById('daily');
 const cashRealEl = document.getElementById('cashReal');
+const diffEl = document.getElementById('diff');
 const viewModalEl = document.getElementById('viewModal');
 const settleAmountEl = document.getElementById('settleAmount');
+const txnModalEl = document.getElementById('txnModal');
+const txnMsgEl = document.getElementById('txnMsg');
+const txnTitleEl = document.getElementById('txnTitle');
 
 /* ======= LOGIN ======= */
 function doLogin(){
@@ -284,6 +305,7 @@ document.addEventListener('keydown', (e)=>{
   if(e.key === 'Escape'){
     if(camEl.style.display === 'block') stopCam();
     if(viewModalEl.style.display === 'block') closeView();
+    if(txnModalEl.style.display === 'block') closeTxn();
   }
 });
 
@@ -378,9 +400,11 @@ function pay(){
 
   const clientName = (client.value||'').trim();
 
-  let status = cash >= total ? 'paid' : 'owed';
+  // compute change and net collected (net is what stays in register)
   let changeAmount = Math.max(0, cash - total);
+  let netCollected = Math.min(cash, total); // this is what should be added to daily
   let due = Math.max(0, total - cash);
+  let status = cash >= total ? 'paid' : 'owed';
 
   // Update stock immediately and persist
   for(let item of sales){
@@ -396,7 +420,9 @@ function pay(){
     client: clientName || null,
     items: JSON.parse(JSON.stringify(sales)),
     total,
-    amountPaid: cash,
+    // store amountPaid as the actual collected amount (net), and also keep raw cashGiven
+    amountPaid: netCollected,
+    cashGiven: cash,
     change: changeAmount,
     due,
     status
@@ -405,16 +431,43 @@ function pay(){
   salesHistory.unshift(record);
   localStorage.setItem('salesHistory', JSON.stringify(salesHistory));
 
-  // Update daily with the amount actually collected now (cash)
-  daily += record.amountPaid;
+  // Update daily with the amount actually collected now (netCollected)
+  daily += netCollected;
   localStorage.setItem('daily', daily);
 
   // Clear current basket and UI
   store(); cancel(); updateDaily(); renderHistory();
 
-  // Show messages
-  if(status==='paid') alert('Shitja u krye. Kusur: ' + changeAmount + ' ALL');
-  else alert('Shitja u regjistrua si BORXH. Mungojnë: ' + due + ' ALL (Paguat: ' + cash + ' ALL)');
+  // Show success modal with details (products, amount given, change)
+  if(status==='paid'){
+    // Build product list HTML
+    let prodHtml = '<ul class="txn-list">';
+    record.items.forEach(it=>{
+      prodHtml += `<li>${escapeHtml(it.n)} x${it.q} = ${it.q * it.p} ALL</li>`;
+    });
+    prodHtml += '</ul>';
+
+    const html = `
+      <div style="color:green;font-weight:700;margin-bottom:6px">Transaksioni u mbyll me sukses</div>
+      <div><b>Produkte:</b>${prodHtml}</div>
+      <div class="txn-summary">Total: ${record.total} ALL</div>
+      <div>Klienti dha: ${record.cashGiven} ALL</div>
+      <div>Kusur: ${record.change} ALL</div>
+      <div class="small" style="margin-top:6px">Shuma e shtuar në arkë (neto): ${record.amountPaid} ALL</div>
+    `;
+    txnTitleEl.textContent = 'Shitje e plotë';
+    showTxn(html);
+  } else {
+    const html = `
+      <div style="color:#b45f00;font-weight:700;margin-bottom:6px">Shitja u regjistrua si BORXH</div>
+      <div><b>Produkte:</b><ul class="txn-list">${record.items.map(it=>`<li>${escapeHtml(it.n)} x${it.q} = ${it.q*it.p} ALL</li>`).join('')}</ul></div>
+      <div class="txn-summary">Total: ${record.total} ALL</div>
+      <div>Paguat tani (neto): ${record.amountPaid} ALL</div>
+      <div>Mbetje (borxh): ${record.due} ALL</div>
+    `;
+    txnTitleEl.textContent = 'Shitje me borxh';
+    showTxn(html);
+  }
 }
 
 /* Cancel current sale (keeps products/state persisted) */
@@ -424,7 +477,7 @@ function cancel(){
 
 /* ======= HISTORIK ======= */
 function renderHistory(){
-  histTableEl.innerHTML = '<tr><th>Data</th><th>Klient</th><th>Total</th><th>Paguar</th><th>Mbetje</th><th>Status</th><th>Veprime</th></tr>';
+  histTableEl.innerHTML = '<tr><th>Data</th><th>Klient</th><th>Total</th><th>Paguar(net)</th><th>Mbetje</th><th>Status</th><th>Veprime</th></tr>';
   salesHistory.forEach(rec=>{
     histTableEl.innerHTML += `<tr>
       <td>${rec.timestamp.replace('T',' ').slice(0,19)}</td>
@@ -447,7 +500,9 @@ function viewSale(id){
   let html = `<p><b>Data:</b> ${r.timestamp.replace('T',' ').slice(0,19)}</p>`;
   html += `<p><b>Klient:</b> ${escapeHtml(r.client||'--')}</p>`;
   html += `<p><b>Total:</b> ${r.total} ALL</p>`;
-  html += `<p><b>Paguar:</b> ${r.amountPaid} ALL</p>`;
+  html += `<p><b>Paguar (neto):</b> ${r.amountPaid} ALL</p>`;
+  html += `<p><b>Klienti dha:</b> ${r.cashGiven !== undefined ? r.cashGiven + ' ALL' : '--'}</p>`;
+  html += `<p><b>Kusur:</b> ${r.change} ALL</p>`;
   html += `<p><b>Mbetje:</b> ${r.due} ALL</p>`;
   html += `<p><b>Status:</b> ${r.status}</p>`;
   html += '<hr><p><b>Produkte:</b></p><ul>';
@@ -494,14 +549,14 @@ function settleDebt(){
   // Persist history
   localStorage.setItem('salesHistory', JSON.stringify(salesHistory));
   updateDaily(); renderHistory(); viewSale(id); // re-open modal with updated values
-  alert('U faturua shuma: ' + payNow + ' ALL');
+  showTxn(`<div style="color:green;font-weight:700">Transaksioni u mbyll me sukses</div><div>U faturua shuma: ${payNow} ALL</div>`);
 }
 
 /* ======= EXPORT CSV ======= */
 function exportCSV(){
   if(!salesHistory.length) return alert('Nuk ka të dhëna për eksport');
   const rows = [];
-  const header = ['id','timestamp','client','total','amountPaid','due','status','items'];
+  const header = ['id','timestamp','client','total','amountPaid','cashGiven','change','due','status','items'];
   rows.push(header.join(','));
   salesHistory.slice().reverse().forEach(r=>{
     const itemsText = r.items.map(i=>`${i.n} x${i.q}=${i.q*i.p}`).join(' | ');
@@ -511,6 +566,8 @@ function exportCSV(){
       `"${(r.client||'')}"`,
       r.total,
       r.amountPaid,
+      r.cashGiven !== undefined ? r.cashGiven : '',
+      r.change,
       r.due,
       r.status,
       `"${itemsText}"`
@@ -539,16 +596,45 @@ function clearOld(){
 function updateDaily(){ dailyEl.textContent = daily; }
 cashRealEl.addEventListener('input', ()=>{
   let d = (+cashRealEl.value||0) - daily;
-  diff.textContent = d + ' ALL'; diff.style.color = d < 0 ? 'red' : 'green';
+  diffEl.textContent = d + ' ALL'; diffEl.style.color = d < 0 ? 'red' : 'green';
 });
 function closeDay(){
   const sys = daily;
   const arka = +cashRealEl.value || 0;
   const diffv = arka - sys;
-  alert(`Sistemi (duhet në arkë): ${sys} ALL\nArka (me dore): ${arka} ALL\nDiferenca: ${diffv} ALL`);
-  localStorage.setItem('dayClosures', JSON.stringify((JSON.parse(localStorage.getItem('dayClosures')||'[]')).concat([{timestamp:new Date().toISOString(), system:sys, cash:arka, diff:diffv}])));
+
+  // store closure record
+  const closures = JSON.parse(localStorage.getItem('dayClosures')||'[]');
+  const closure = {timestamp:new Date().toISOString(), system:sys, cash:arka, diff:diffv};
+  closures.push(closure);
+  localStorage.setItem('dayClosures', JSON.stringify(closures));
+
+  // reset daily
   daily = 0; localStorage.setItem('daily',0);
-  cashRealEl.value=''; updateDaily(); diff.textContent=0;
+  cashRealEl.value=''; updateDaily(); diffEl.textContent=0;
+
+  // Build modal html (same style as txn modal)
+  const html = `
+    <div style="color:green;font-weight:700;margin-bottom:6px">Transaksioni u mbyll me sukses</div>
+    <div><b>Bilanci i mbyllur:</b></div>
+    <div>Shuma në sistem (duhet në arkë): ${closure.system} ALL</div>
+    <div>Arka (me dore): ${closure.cash} ALL</div>
+    <div style="margin-top:6px"><b>Diferenca:</b> ${closure.diff} ALL</div>
+    <div class="small" style="margin-top:8px">Koha: ${closure.timestamp.replace('T',' ').slice(0,19)}</div>
+  `;
+  txnTitleEl.textContent = 'Mbyllje dite';
+  showTxn(html);
+}
+
+/* ======= TRANSACTION MODAL UTILS ======= */
+function showTxn(html){
+  // Accept HTML string and display in txn modal
+  txnMsgEl.innerHTML = html;
+  txnModalEl.style.display = 'block';
+}
+function closeTxn(){
+  txnModalEl.style.display = 'none';
+  txnMsgEl.innerHTML = '';
 }
 
 /* ======= UTIL ======= */
