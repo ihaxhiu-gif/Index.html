@@ -30,10 +30,11 @@ th{background:#f1f5f9}
 #scanner{width:100%;background:#000;border-radius:8px;overflow:hidden}
 
 /* small modal variant (less tall) */
-.modal-content.small-modal{max-width:420px;padding:12px;text-align:left}
+.modal-content.small-modal{max-width:720px;padding:12px;text-align:left}
 .modal-content.small-modal h4{margin:6px 0}
 .txn-list{margin:6px 0;padding-left:18px}
 .txn-summary{margin-top:8px;font-weight:600}
+.suggestion{background:#f8fafc;padding:8px;border-radius:8px;margin-top:6px}
 </style>
 
 <script src="https://unpkg.com/@ericblade/quagga2/dist/quagga.js"></script>
@@ -116,6 +117,8 @@ th{background:#f1f5f9}
 <input id="cashReal" type="number" placeholder="Shuma reale në arkë">
 <p>Diferenca: <b><span id="diff">0</span></b></p>
 <button onclick="closeDay()">Mbyll Ditën</button>
+<!-- shtim: buton manual për të parë sugjerimet pa mbyllje -->
+<button onclick="generateReorderReport(true)">Gjenero Sugjerime (pa mbyllje)</button>
 </div>
 </section>
 
@@ -593,6 +596,79 @@ function clearOld(){
 }
 
 /* ======= BILANCI / MBYLL DITA ======= */
+/* Helping functions for reports */
+function getLocalDateStr(iso){
+  const d = new Date(iso);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function isSameLocalDate(isoA, isoB){
+  return getLocalDateStr(isoA) === getLocalDateStr(isoB);
+}
+function aggregateSales(records){
+  const agg = {};
+  records.forEach(r=>{
+    (r.items||[]).forEach(it=>{
+      const key = it.b || it.n;
+      if(!agg[key]) agg[key] = {b: it.b, n: it.n, qty:0, revenue:0};
+      agg[key].qty += it.q;
+      agg[key].revenue += (it.q * it.p);
+    });
+  });
+  return agg;
+}
+function getSalesSinceDays(days){
+  const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+  return salesHistory.filter(r => new Date(r.timestamp).getTime() >= cutoff);
+}
+/* Determine if today is one of the two weekly report days.
+   By default: Monday (1) & Thursday (4). You can change these values. */
+function isWeeklyReportDay(date){
+  const d = date.getDay(); // 0 = Sunday, 1 = Monday, ...
+  return d === 1 || d === 4;
+}
+
+/* Generate reorder suggestions (if manual=true shows even if not weekly day) */
+function generateReorderReport(manual=false){
+  const now = new Date();
+  const isWeekly = isWeeklyReportDay(now);
+  if(!manual && !isWeekly) return null;
+
+  // 7-day average per product
+  const last7 = getSalesSinceDays(7);
+  const agg7 = aggregateSales(last7);
+
+  // 14-day check for slow items
+  const last14 = getSalesSinceDays(14);
+  const agg14 = aggregateSales(last14);
+
+  const suggestions = [];
+  const slowItems = [];
+
+  // For each product in catalog
+  products.forEach(p=>{
+    const key = p.b || p.n;
+    const sold7 = agg7[key] ? agg7[key].qty : 0;
+    const avgDaily7 = sold7 / 7;
+    // heuristics: reorder if avgDaily7 * leadDays > stock
+    // leadDays = 3 (want 3 days of stock by avg), reorderQty = avgDaily7*7 - stock (one week)
+    const leadDaysFactor = 3;
+    const targetStock = Math.ceil(avgDaily7 * leadDaysFactor);
+    if(avgDaily7 > 0){
+      if(p.s < targetStock){
+        const suggestedQty = Math.max(1, Math.ceil(avgDaily7 * 7) - p.s); // try to cover 1 week more
+        suggestions.push({b:p.b,n:p.n,stock:p.s,avgDaily7:avgDaily7.toFixed(2),suggest: suggestedQty});
+      }
+    } else {
+      // if not sold in 14 days -> slow
+      if(!agg14[key] || agg14[key].qty === 0){
+        slowItems.push({b:p.b,n:p.n,stock:p.s});
+      }
+    }
+  });
+
+  return {isWeekly, suggestions, slowItems};
+}
+
 function updateDaily(){ dailyEl.textContent = daily; }
 cashRealEl.addEventListener('input', ()=>{
   let d = (+cashRealEl.value||0) - daily;
@@ -613,7 +689,62 @@ function closeDay(){
   daily = 0; localStorage.setItem('daily',0);
   cashRealEl.value=''; updateDaily(); diffEl.textContent=0;
 
-  // Build modal html (same style as txn modal)
+  // Build modal html (same style as txn modal) and append inventory report
+  const now = new Date();
+  const todayStr = getLocalDateStr(now.toISOString());
+  // Filter salesHistory for today's date (local)
+  const todaySales = salesHistory.filter(r => isSameLocalDate(r.timestamp, now.toISOString()));
+  const aggToday = aggregateSales(todaySales);
+
+  let soldHtml = '';
+  let totalQty = 0;
+  let totalRev = 0;
+  if(Object.keys(aggToday).length === 0){
+    soldHtml = '<div>Asnjë shitje sot.</div>';
+  } else {
+    soldHtml = '<ul class="txn-list">';
+    Object.values(aggToday).forEach(item=>{
+      soldHtml += `<li>${escapeHtml(item.n)} — Sasi: ${item.qty} — Të ardhura: ${item.revenue} ALL</li>`;
+      totalQty += item.qty;
+      totalRev += item.revenue;
+    });
+    soldHtml += '</ul>';
+  }
+
+  // find top seller
+  let topSellerHtml = '<div>Nuk ka të dhëna për top-seller.</div>';
+  const itemsArr = Object.values(aggToday);
+  if(itemsArr.length){
+    itemsArr.sort((a,b)=>b.qty - a.qty);
+    const top = itemsArr[0];
+    topSellerHtml = `<div class="suggestion"><b>Top Produkt i Sotëm:</b> ${escapeHtml(top.n)} — Sasi: ${top.qty} — Të ardhura: ${top.revenue} ALL</div>`;
+  }
+
+  // Weekly reorder suggestions (2x/week)
+  const reorder = generateReorderReport(false);
+  let reorderHtml = '';
+  if(reorder && reorder.isWeekly){
+    if(reorder.suggestions.length === 0){
+      reorderHtml += '<div>Asnjë sugjerim për riporositje bazuar në 7-ditoren e fundit.</div>';
+    } else {
+      reorderHtml += '<div><b>Sugjerime blerjeje (bazuar në mesataren 7-ditore):</b></div><ul class="txn-list">';
+      reorder.suggestions.forEach(s=>{
+        reorderHtml += `<li>${escapeHtml(s.n)} — Stok aktual: ${s.stock} — Mesatare/ditë: ${s.avgDaily7} — Shto rreth: <b>${s.suggest}</b></li>`;
+      });
+      reorderHtml += '</ul>';
+    }
+    if(reorder.slowItems.length){
+      reorderHtml += '<div style="margin-top:8px"><b>Produkte që nuk u shitën në 14 ditët e fundit:</b></div><ul class="txn-list">';
+      reorder.slowItems.forEach(si=>{
+        reorderHtml += `<li>${escapeHtml(si.n)} — Stok: ${si.stock}</li>`;
+      });
+      reorderHtml += '</ul>';
+    }
+  } else {
+    // if not weekly day, inform user which days produce reorder suggestions
+    reorderHtml += `<div class="small">Sugjerime blerjeje prodhohen 2 herë në javë (aktualisht: e hënë & e enjte). Për të parë sugjerimet tani, përdorni butonin "Gjenero Sugjerime (pa mbyllje)".</div>`;
+  }
+
   const html = `
     <div style="color:green;font-weight:700;margin-bottom:6px">Transaksioni u mbyll me sukses</div>
     <div><b>Bilanci i mbyllur:</b></div>
@@ -621,9 +752,84 @@ function closeDay(){
     <div>Arka (me dore): ${closure.cash} ALL</div>
     <div style="margin-top:6px"><b>Diferenca:</b> ${closure.diff} ALL</div>
     <div class="small" style="margin-top:8px">Koha: ${closure.timestamp.replace('T',' ').slice(0,19)}</div>
+    <hr>
+    <div><b>Raporti i Shitjeve për sot (${todayStr}):</b></div>
+    ${soldHtml}
+    <div><b>Totali i produkteve te shitura:</b> ${totalQty} — <b>Të ardhurat:</b> ${totalRev} ALL</div>
+    ${topSellerHtml}
+    <hr>
+    <div><b>Raport riporositjeje (2x/javë):</b></div>
+    ${reorderHtml}
   `;
-  txnTitleEl.textContent = 'Mbyllje dite';
+  txnTitleEl.textContent = 'Mbyllje dite + Raport';
   showTxn(html);
+}
+
+/* Allow manual generation of reorder report (without closing day) */
+function generateReorderReport(manual=false){
+  const rep = generateReorderReport_inner(manual);
+  if(!rep) {
+    alert('Këtë raport prodhojmë vetëm 2 herë në javë (e hënë & e enjte). Përdorni butonin me "--(pa mbyllje)" për ta parë tani.');
+    return;
+  }
+  // build html
+  let html = `<div style="color:#0b5cff;font-weight:700;margin-bottom:6px">Raport Riporositjeje</div>`;
+  if(rep.suggestions.length === 0){
+    html += '<div>Asnjë sugjerim për riporositje bazuar në 7-ditoren e fundit.</div>';
+  } else {
+    html += '<div><b>Sugjerime blerjeje (bazuar në mesataren 7-ditore):</b></div><ul class="txn-list">';
+    rep.suggestions.forEach(s=>{
+      html += `<li>${escapeHtml(s.n)} — Stok aktual: ${s.stock} — Mesatare/ditë: ${s.avgDaily7} — Shto rreth: <b>${s.suggest}</b></li>`;
+    });
+    html += '</ul>';
+  }
+  if(rep.slowItems.length){
+    html += '<div style="margin-top:8px"><b>Produkte që nuk u shitën në 14 ditët e fundit:</b></div><ul class="txn-list">';
+    rep.slowItems.forEach(si=>{
+      html += `<li>${escapeHtml(si.n)} — Stok: ${si.stock}</li>`;
+    });
+    html += '</ul>';
+  }
+  txnTitleEl.textContent = 'Sugjerime Riporositjeje';
+  showTxn(html);
+}
+
+/* internal wrapper to avoid name collision */
+function generateReorderReport_inner(manual=false){
+  const now = new Date();
+  const isWeekly = isWeeklyReportDay(now);
+  if(!manual && !isWeekly) return null;
+
+  // 7-day average per product
+  const last7 = getSalesSinceDays(7);
+  const agg7 = aggregateSales(last7);
+
+  // 14-day check for slow items
+  const last14 = getSalesSinceDays(14);
+  const agg14 = aggregateSales(last14);
+
+  const suggestions = [];
+  const slowItems = [];
+
+  products.forEach(p=>{
+    const key = p.b || p.n;
+    const sold7 = agg7[key] ? agg7[key].qty : 0;
+    const avgDaily7 = sold7 / 7;
+    const leadDaysFactor = 3;
+    const targetStock = Math.ceil(avgDaily7 * leadDaysFactor);
+    if(avgDaily7 > 0){
+      if(p.s < targetStock){
+        const suggestedQty = Math.max(1, Math.ceil(avgDaily7 * 7) - p.s);
+        suggestions.push({b:p.b,n:p.n,stock:p.s,avgDaily7:avgDaily7.toFixed(2),suggest: suggestedQty});
+      }
+    } else {
+      if(!agg14[key] || agg14[key].qty === 0){
+        slowItems.push({b:p.b,n:p.n,stock:p.s});
+      }
+    }
+  });
+
+  return {isWeekly, suggestions, slowItems};
 }
 
 /* ======= TRANSACTION MODAL UTILS ======= */
